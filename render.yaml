@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: vector
+    env: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    disk:
+      name: vector-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: VECTOR_DATA_DIR
+        value: /app/data
+      - key: LOG_LEVEL
+        value: INFO

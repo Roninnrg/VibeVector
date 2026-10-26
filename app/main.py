@@ -31,8 +31,9 @@ async def lifespan(app: FastAPI):
     init_db()
     settings.ensure_dirs()
     MANAGER.recover()
-    port = os.getenv("VECTOR_PORT", "8000").strip() or "8000"
-    log.info("«Вектор» запущен: http://127.0.0.1:%s", port)
+    port = os.getenv("PORT") or os.getenv("VECTOR_PORT", "8000")
+    port = str(port).strip() or "8000"
+    log.info("«Вектор» запущен на порту %s", port)
     yield
     MANAGER.shutdown()
 
@@ -106,10 +107,11 @@ def spa_fallback(full_path: str) -> FileResponse:
 def run() -> None:
     import uvicorn
 
+    port = int(os.getenv("PORT") or os.getenv("VECTOR_PORT", "8000"))
     uvicorn.run(
         "app.main:app",
-        host="127.0.0.1",
-        port=8000,
+        host="0.0.0.0",
+        port=port,
         reload=False,
         log_level=settings.log_level.lower(),
     )
