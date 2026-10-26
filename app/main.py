@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import router as api_router
@@ -43,6 +43,10 @@ app = FastAPI(
     version=settings.version,
     description="Загрузка лекций, транскрибация, конспект, структура и поиск по смыслу.",
     lifespan=lifespan,
+    # Своя страница /docs на локальных ассетах: CDN-версия Swagger UI
+    # блокируется строгой CSP и не работает без интернета.
+    docs_url=None,
+    redoc_url=None,
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=800)
@@ -92,6 +96,16 @@ def index() -> FileResponse:
 @app.get("/favicon.svg", include_in_schema=False)
 def favicon() -> FileResponse:
     return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
+
+
+@app.get("/docs", include_in_schema=False)
+def api_docs() -> FileResponse:
+    return FileResponse(STATIC_DIR / "docs.html", media_type="text/html")
+
+
+@app.get("/redoc", include_in_schema=False)
+def api_redoc() -> RedirectResponse:
+    return RedirectResponse("/docs", status_code=307)
 
 
 @app.get("/{full_path:path}", include_in_schema=False)

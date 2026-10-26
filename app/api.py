@@ -107,10 +107,14 @@ def list_lectures(
 def get_lecture(lecture_id: str) -> dict:
     lecture = _get_lecture(lecture_id)
     lecture.update(_counts(lecture_id))
+    if lecture.get("status") == "ready":
+        # Страница обработки опрашивает API каждые пару секунд — не накручиваем
+        # просмотры до того, как лекция действительно открыта для просмотра.
+        with db.db() as conn:
+            conn.execute(
+                "UPDATE lectures SET views = views + 1 WHERE id=?", (lecture_id,)
+            )
     with db.db() as conn:
-        conn.execute(
-            "UPDATE lectures SET views = views + 1 WHERE id=?", (lecture_id,)
-        )
         chapters = conn.execute(
             "SELECT idx, start, end, title, summary, keywords_json FROM chapters "
             "WHERE lecture_id=? ORDER BY idx",

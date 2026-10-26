@@ -44,7 +44,11 @@ MOCK_CUES = [
 ]
 
 
-def create_lecture(lecture_id: str = "pipe-lecture", status: str = "queued") -> Path:
+def create_lecture(
+    lecture_id: str = "pipe-lecture",
+    status: str = "queued",
+    title: str = "Конвейерная лекция",
+) -> Path:
     media = Path(settings.media_dir) / f"{lecture_id}.mp4"
     media.write_bytes(b"\x00" * 64)
     now = db.now_iso()
@@ -56,7 +60,7 @@ def create_lecture(lecture_id: str = "pipe-lecture", status: str = "queued") -> 
                 created_at, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                lecture_id, "Конвейерная лекция", "", "upload", media.name, str(media),
+                lecture_id, title, "", "upload", media.name, str(media),
                 "video/mp4", 64, 30.0, status, "В очереди", 0, now, now,
             ),
         )
@@ -261,7 +265,7 @@ class TestRemoteDownload:
     def test_uses_bundled_ffmpeg_for_merging(self, monkeypatch):
         ffmpeg = str(Path(settings.tools_dir) / "ffmpeg" / "bin" / "ffmpeg.exe")
         calls = self._fake_yt_dlp(monkeypatch, ffmpeg)
-        create_lecture("remote-lecture")
+        create_lecture("remote-lecture", title="Лекция с YouTube")
 
         path = pipeline._download_remote(
             "remote-lecture", "https://www.youtube.com/watch?v=test", lambda *a: None
@@ -276,6 +280,23 @@ class TestRemoteDownload:
                 "SELECT title FROM lectures WHERE id='remote-lecture'"
             ).fetchone())
         assert lecture["title"] == "Видео с YouTube"
+
+    def test_keeps_user_title_on_download(self, monkeypatch):
+        ffmpeg = str(Path(settings.tools_dir) / "ffmpeg" / "bin" / "ffmpeg.exe")
+        self._fake_yt_dlp(monkeypatch, ffmpeg)
+        create_lecture("remote-lecture-titled", title="Моё название лекции")
+
+        pipeline._download_remote(
+            "remote-lecture-titled",
+            "https://www.youtube.com/watch?v=test",
+            lambda *a: None,
+        )
+
+        with db.db() as conn:
+            lecture = dict(conn.execute(
+                "SELECT title FROM lectures WHERE id='remote-lecture-titled'"
+            ).fetchone())
+        assert lecture["title"] == "Моё название лекции"
 
     def test_falls_back_to_single_format_without_ffmpeg(self, monkeypatch):
         calls = self._fake_yt_dlp(monkeypatch, None)

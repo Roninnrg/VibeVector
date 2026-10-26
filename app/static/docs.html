@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>API — Вектор</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/vendor/swagger-ui/swagger-ui.css">
+  <style>
+    :root { color-scheme: light; }
+    html, body { margin: 0; padding: 0; background: #faf9f6; }
+    .api-bar {
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+      padding: 14px 22px; background: #10120f; color: #f4f1e8;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    .api-bar a { color: #d7ff5f; text-decoration: none; font-weight: 600; }
+    .api-bar a:hover { text-decoration: underline; }
+    .api-bar span { opacity: .7; font-size: 13px; }
+    .swagger-ui .topbar { display: none; }
+    .swagger-ui .info { margin: 28px 0; }
+    @media (max-width: 640px) {
+      .api-bar { padding: 12px 14px; }
+      .swagger-ui .wrapper { padding: 0 12px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="api-bar">
+    <a href="/">← «Вектор»</a>
+    <span>HTTP API · OpenAPI 3 · интерактивная документация</span>
+  </header>
+  <div id="swagger-ui"></div>
+  <script src="/static/vendor/swagger-ui/swagger-ui-bundle.js"></script>
+  <script src="/static/js/docs.js"></script>
+</body>
+</html>

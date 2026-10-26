@@ -205,7 +205,14 @@ def _download_remote(lecture_id: str, url: str, progress: Callable[[int, str], N
     path = candidates[0]
     title = (info or {}).get("title")
     if title:
-        _update(lecture_id, title=str(title)[:240])
+        with db.db() as conn:
+            row = conn.execute(
+                "SELECT title FROM lectures WHERE id=?", (lecture_id,)
+            ).fetchone()
+        current = ((row["title"] if row else "") or "").strip()
+        # Не затираем имя, которое пользователь указал при импорте.
+        if current in {"", "Лекция с YouTube", "Лекция с Vimeo"}:
+            _update(lecture_id, title=str(title)[:240])
     return path
 
 
