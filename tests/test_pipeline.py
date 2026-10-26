@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -243,6 +244,47 @@ class TestPipelineInternals:
         manager = pipeline.JobManager(max_workers=1)
         manager.shutdown()
         assert manager.submit("x") is False
+
+
+class TestCancelDuringProcessing:
+    def test_cancelled_job_stops_and_removes_files(self, patched_pipeline):
+        manager = pipeline.JobManager(max_workers=1)
+        patched_pipeline.setattr(pipeline, "MANAGER", manager)
+        media = create_lecture("cancel-lecture")
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_probe(path):
+            started.set()
+            release.wait(5)
+            return FakeInfo.as_probe()
+
+        patched_pipeline.setattr(pipeline, "probe", slow_probe)
+        assert manager.submit("cancel-lecture") is True
+        assert started.wait(5)
+        assert manager.cancel("cancel-lecture") is True
+
+        # Так же поступает DELETE: сначала отменяет задачу, затем убирает запись.
+        with db.db() as conn:
+            conn.execute("DELETE FROM lectures WHERE id='cancel-lecture'")
+        release.set()
+
+        deadline = time.time() + 10
+        while manager.active() and time.time() < deadline:
+            time.sleep(0.02)
+        manager.executor.shutdown(wait=True)
+
+        with db.db() as conn:
+            lectures = conn.execute(
+                "SELECT COUNT(*) AS c FROM lectures WHERE id='cancel-lecture'"
+            ).fetchone()["c"]
+            segments = conn.execute(
+                "SELECT COUNT(*) AS c FROM segments WHERE lecture_id='cancel-lecture'"
+            ).fetchone()["c"]
+        assert lectures == 0
+        assert segments == 0
+        assert not Path(media).exists()
+        assert not (Path(settings.audio_dir) / "cancel-lecture.wav").exists()
 
 
 class TestRemoteDownload:

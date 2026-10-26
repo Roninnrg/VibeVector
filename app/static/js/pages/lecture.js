@@ -863,12 +863,31 @@ export function mount(root, ctx) {
   }
 
   async function remove() {
-    if (!window.confirm(`Удалить лекцию «${lecture.title}»? Расшифровка, индекс и медиафайл будут удалены безвозвратно.`)) return;
+    const inProgress = ["queued", "processing"].includes(lecture.status);
+    const question = inProgress
+      ? `Удалить лекцию «${lecture.title}»? Обработка будет остановлена, а расшифровка, индекс и медиафайл удалятся безвозвратно.`
+      : `Удалить лекцию «${lecture.title}»? Расшифровка, индекс и медиафайл будут удалены безвозвратно.`;
+    if (!window.confirm(question)) return;
+    const buttons = Array.from(root.querySelectorAll("[data-delete]"));
+    buttons.forEach((button) => {
+      button.dataset.labelHtml = button.innerHTML;
+      button.disabled = true;
+      button.textContent = "Удаляем…";
+    });
     try {
       await api.deleteLecture(lecture.id);
       toast("Лекция удалена.", "success");
       ctx.navigate("/");
     } catch (error) {
+      if (error.status === 404) {
+        toast("Лекция уже удалена.", "info");
+        ctx.navigate("/");
+        return;
+      }
+      buttons.forEach((button) => {
+        button.disabled = false;
+        button.innerHTML = button.dataset.labelHtml || `${icon("trash")} Удалить`;
+      });
       toast(error.message || "Не удалось удалить лекцию.", "error");
     }
   }

@@ -119,6 +119,18 @@ class TestLectures:
         assert client.get("/api/lectures/api-lecture").status_code == 404
         assert client.get("/api/lectures").json()["count"] == 0
 
+    def test_delete_lecture_while_processing(self, client, lecture):
+        with db.db() as conn:
+            conn.execute(
+                "UPDATE lectures SET status='processing', stage='Распознаём речь', progress=40 "
+                "WHERE id='api-lecture'"
+            )
+        response = client.delete("/api/lectures/api-lecture")
+        assert response.status_code == 200
+        assert response.json()["deleted"] is True
+        assert client.get("/api/lectures/api-lecture").status_code == 404
+        assert client.get("/api/lectures").json()["count"] == 0
+
     def test_delete_missing_404(self, client):
         assert client.delete("/api/lectures/nope").status_code == 404
 

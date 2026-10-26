@@ -470,13 +470,16 @@ def update_lecture(lecture_id: str, payload: LectureUpdate) -> dict:
 @router.delete("/lectures/{lecture_id}")
 def delete_lecture(lecture_id: str) -> dict:
     lecture = _get_lecture(lecture_id)
-    if lecture["status"] == "processing":
-        raise HTTPException(409, "Дождитесь завершения обработки перед удалением.")
+    # Если лекция ещё в очереди или обрабатывается — останавливаем конвейер.
+    MANAGER.cancel(lecture_id)
     with db.db() as conn:
         conn.execute("DELETE FROM lectures WHERE id=?", (lecture_id,))
     media.safe_unlink(lecture.get("media_path"))
     media.safe_unlink(lecture.get("thumbnail_path"))
     media.safe_unlink(Path(settings.audio_dir) / f"{lecture_id}.wav")
+    # Недокачанные или только что созданные файлы обрабатываемой лекции.
+    for leftover in Path(settings.media_dir).glob(f"{lecture_id}.*"):
+        media.safe_unlink(leftover)
     db.bump_index_version()
     get_search_service().rebuild()
     return {"deleted": True, "id": lecture_id}

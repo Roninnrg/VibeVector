@@ -29,6 +29,7 @@ export function openUpload({ navigate, onCreated } = {}) {
   let activeTab = "file";
   let selectedFile = null;
   let uploading = false;
+  let uploadController = null;
   let closed = false;
   let factsCleanup = null;
 
@@ -233,9 +234,12 @@ export function openUpload({ navigate, onCreated } = {}) {
     const cancel = form.querySelector("[data-cancel]");
     const close = root.querySelector("[data-close]");
     submit.disabled = busy;
-    cancel.disabled = busy;
     close.disabled = busy;
     submit.innerHTML = busy ? `<span class="spinner dark"></span> Обрабатываем…` : submit.dataset.label;
+    if (cancel) {
+      cancel.dataset.label = cancel.dataset.label || cancel.textContent;
+      cancel.textContent = busy ? "Прервать" : cancel.dataset.label;
+    }
   }
 
   [fileSubmit, linkSubmit].forEach((button) => {
@@ -255,18 +259,22 @@ export function openUpload({ navigate, onCreated } = {}) {
     filePct.textContent = "0%";
     fileSubmit.disabled = true;
     setBusy(fileForm, true);
+    uploadController = new AbortController();
+    const controller = uploadController;
     const title = fileForm.querySelector('[name="title"]').value.trim();
     const language = fileForm.querySelector('[name="language"]').value;
     try {
       const lecture = await api.upload(selectedFile, {
         title,
         language,
+        signal: controller.signal,
         onProgress: (percent) => {
           const shown = Math.max(1, Math.min(99, percent));
           fileFill.style.width = `${shown}%`;
           filePct.textContent = `${shown}%`;
         },
       });
+      uploadController = null;
       fileFill.style.width = "100%";
       filePct.textContent = "100%";
       close(true);
@@ -274,10 +282,18 @@ export function openUpload({ navigate, onCreated } = {}) {
       if (typeof onCreated === "function") onCreated(lecture);
       else navigate(`/lecture/${lecture.id}`);
     } catch (error) {
+      const aborted = controller.signal.aborted;
+      uploadController = null;
       fileProgress.classList.remove("visible");
-      showError(fileForm, error.message || "Не удалось загрузить файл.");
-      fileSubmit.disabled = false;
+      fileFill.style.width = "0%";
+      filePct.textContent = "0%";
       setBusy(fileForm, false);
+      fileSubmit.disabled = !selectedFile;
+      if (aborted) {
+        toast("Загрузка отменена.", "info");
+        return;
+      }
+      showError(fileForm, error.message || "Не удалось загрузить файл.");
     }
   });
 
@@ -344,7 +360,14 @@ export function openUpload({ navigate, onCreated } = {}) {
     }
   }
 
-  root.querySelectorAll("[data-cancel]").forEach((button) => button.addEventListener("click", () => close()));
+  root.querySelectorAll("[data-cancel]").forEach((button) => button.addEventListener("click", () => {
+    if (uploading) {
+      if (uploadController) uploadController.abort();
+      else toast("Дождитесь завершения импорта.", "info");
+      return;
+    }
+    close();
+  }));
   root.querySelector("[data-close]").addEventListener("click", () => close());
   backdrop.addEventListener("mousedown", (event) => {
     if (event.target === backdrop) close();

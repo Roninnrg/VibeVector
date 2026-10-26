@@ -40,10 +40,15 @@ def _update(lecture_id: str, **fields) -> None:
         )
 
 
+class PipelineCancelled(Exception):
+    """Обработку остановили: лекцию удалили во время загрузки или разбора."""
+
+
 class JobManager:
     def __init__(self, max_workers: int = 2):
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="vector-job")
         self._active: dict[str, Future] = {}
+        self._cancelled: set[str] = set()
         self._lock = threading.Lock()
         self._closed = False
 
@@ -54,19 +59,41 @@ class JobManager:
                 return False
             if self._closed:
                 return False
+            self._cancelled.discard(lecture_id)
             future = self.executor.submit(self._run, lecture_id, force)
             self._active[lecture_id] = future
             future.add_done_callback(lambda _: self._forget(lecture_id))
         return True
 
+    def cancel(self, lecture_id: str) -> bool:
+        """Просит остановить обработку. Возвращает True, если задача была активна."""
+        with self._lock:
+            future = self._active.get(lecture_id)
+            if future is None or future.done():
+                return False
+            self._cancelled.add(lecture_id)
+            future.cancel()
+            return True
+
+    def is_cancelled(self, lecture_id: str) -> bool:
+        with self._lock:
+            return lecture_id in self._cancelled
+
     def _forget(self, lecture_id: str) -> None:
         with self._lock:
             self._active.pop(lecture_id, None)
+            self._cancelled.discard(lecture_id)
 
     def _run(self, lecture_id: str, force: bool) -> None:
         try:
             process_lecture(lecture_id, force=force)
+        except PipelineCancelled:
+            log.info("Обработка лекции %s остановлена", lecture_id)
         except Exception as exc:  # noqa: BLE001
+            if not _row_exists(lecture_id):
+                # Лекцию удалили, пока конвейер ещё работал.
+                _cleanup_cancelled(lecture_id)
+                return
             log.exception("Ошибка обработки лекции %s", lecture_id)
             _update(
                 lecture_id,
@@ -100,6 +127,37 @@ class JobManager:
 
 
 MANAGER = JobManager(max_workers=1)
+
+
+def _row_exists(lecture_id: str) -> bool:
+    with db.db() as conn:
+        return conn.execute(
+            "SELECT 1 FROM lectures WHERE id=?", (lecture_id,)
+        ).fetchone() is not None
+
+
+def _ensure_running(lecture_id: str) -> None:
+    """Останавливает конвейер, если лекцию удалили или отменили."""
+    if MANAGER.is_cancelled(lecture_id):
+        raise PipelineCancelled(lecture_id)
+    if not _row_exists(lecture_id):
+        raise PipelineCancelled(lecture_id)
+
+
+def _cleanup_cancelled(lecture_id: str, media_path: str | Path | None = None) -> None:
+    """Убирает файлы и осиротевшие строки прерванной лекции, если записи в БД уже нет."""
+    if _row_exists(lecture_id):
+        return
+    with db.db() as conn:
+        conn.execute("DELETE FROM segments WHERE lecture_id=?", (lecture_id,))
+        conn.execute("DELETE FROM chapters WHERE lecture_id=?", (lecture_id,))
+    db.bump_index_version()
+    reset_search_service()
+    safe_unlink(media_path)
+    safe_unlink(Path(settings.thumb_dir) / f"{lecture_id}.jpg")
+    safe_unlink(Path(settings.audio_dir) / f"{lecture_id}.wav")
+    for leftover in Path(settings.media_dir).glob(f"{lecture_id}.*"):
+        safe_unlink(leftover)
 
 
 def _normalize_proxy(server: str) -> str:
@@ -256,6 +314,7 @@ def _progress_writer(lecture_id: str, start: int, span: int,
     last = {"time": 0.0, "value": -1}
 
     def callback(fraction: float) -> None:
+        _ensure_running(lecture_id)
         now = time.monotonic()
         value = int(start + max(0.0, min(1.0, fraction)) * span)
         if now - last["time"] < min_interval and value < 100:
@@ -275,6 +334,7 @@ def process_lecture(lecture_id: str, force: bool = False) -> None:
         if not row:
             return
     lecture = dict(row)
+    _ensure_running(lecture_id)
     if lecture["status"] == "processing" and not force:
         # защита от параллельного запуска
         _update(lecture_id, stage="Обработка уже идёт")
@@ -292,6 +352,7 @@ def process_lecture(lecture_id: str, force: bool = False) -> None:
         keywords_json="[]",
         llm_used=0,
     )
+    _ensure_running(lecture_id)
     with db.db() as conn:
         conn.execute("DELETE FROM segments WHERE lecture_id=?", (lecture_id,))
         conn.execute("DELETE FROM chapters WHERE lecture_id=?", (lecture_id,))
@@ -300,18 +361,23 @@ def process_lecture(lecture_id: str, force: bool = False) -> None:
 
     media_path = lecture.get("media_path")
     source_url = lecture.get("source_url")
+
+    def remote_progress(percent: int, stage: str) -> None:
+        _ensure_running(lecture_id)
+        _update(lecture_id, progress=percent, stage=stage)
+
     try:
         if not media_path or not Path(media_path).exists():
             if source_url:
-                media_path = str(_download_remote(lecture_id, source_url, lambda p, s: _update(
-                    lecture_id, progress=p, stage=s,
-                )))
+                media_path = str(_download_remote(lecture_id, source_url, remote_progress))
+                _ensure_running(lecture_id)
                 _update(lecture_id, media_path=media_path, media_size=Path(media_path).stat().st_size)
             else:
                 raise MediaError("Файл лекции не найден на диске.")
 
         info = probe(media_path)
         duration = float(info["duration"])
+        _ensure_running(lecture_id)
         _update(
             lecture_id,
             duration=duration,
@@ -331,10 +397,12 @@ def process_lecture(lecture_id: str, force: bool = False) -> None:
             thumb_path = make_thumbnail(media_path, thumb, at=min(5.0, max(1.0, duration / 8)))
             if thumb_path:
                 _update(lecture_id, thumbnail_path=str(thumb_path))
+        _ensure_running(lecture_id)
         _update(lecture_id, progress=7, stage="Извлекаем аудио · 7%")
 
         audio_path = Path(settings.audio_dir) / f"{lecture_id}.wav"
         extract_audio(media_path, audio_path)
+        _ensure_running(lecture_id)
         _update(lecture_id, progress=12, stage="Распознаём речь · 12%")
 
         language = lecture.get("language") or None
@@ -345,6 +413,7 @@ def process_lecture(lecture_id: str, force: bool = False) -> None:
             language=language if language and language != "auto" else None,
             on_progress=_progress_writer(lecture_id, 12, 55, "Распознаём речь"),
         )
+        _ensure_running(lecture_id)
         if not asr_result.cues:
             raise RuntimeError("Речь не распознана. Проверьте, что в видео есть звук.")
         cues = asr_result.cues
@@ -364,6 +433,7 @@ def process_lecture(lecture_id: str, force: bool = False) -> None:
         if not cues:
             raise RuntimeError("Не удалось получить текст лекции.")
 
+        _ensure_running(lecture_id)
         embedder = get_embedder()
         try:
             vectors = embedder.encode_documents([cue["text"] for cue in cues])
@@ -391,6 +461,7 @@ def process_lecture(lecture_id: str, force: bool = False) -> None:
                 summary_text = improved
                 used_llm = True
 
+        _ensure_running(lecture_id)
         now = db.now_iso()
         with db.db() as conn:
             for idx, cue in enumerate(cues):
@@ -447,11 +518,19 @@ def process_lecture(lecture_id: str, force: bool = False) -> None:
                 ),
             )
         db.bump_index_version()
+        _ensure_running(lecture_id)
         get_search_service().rebuild()
         db.log_event("lecture_ready", lecture_id=lecture_id, cues=len(cues), llm=used_llm)
         safe_unlink(audio_path)
         log.info("Лекция %s готова: %s реплик, %.0f c", lecture_id, len(cues), duration)
+    except PipelineCancelled:
+        log.info("Обработка лекции %s прервана: лекцию удалили", lecture_id)
+        _cleanup_cancelled(lecture_id, media_path)
     except Exception as exc:
+        if not _row_exists(lecture_id):
+            # Лекцию удалили во время обработки — не воскрешаем её статусом «Ошибка».
+            _cleanup_cancelled(lecture_id, media_path)
+            return
         safe_unlink(Path(settings.audio_dir) / f"{lecture_id}.wav")
         _update(
             lecture_id,
