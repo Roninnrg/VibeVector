@@ -26,7 +26,7 @@ from app.services.embeddings import HashingEmbedder, set_embedder  # noqa: E402
 from app.services.search import reset_search_service  # noqa: E402
 from app.text import lemmatize  # noqa: E402
 
-TABLES = ("segments", "chapters", "events", "lectures")
+TABLES = ("favorites", "sessions", "segments", "chapters", "events", "users", "lectures")
 
 
 @pytest.fixture(scope="session", autouse=True)

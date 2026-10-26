@@ -5,6 +5,7 @@ import json
 import logging
 import mimetypes
 import re
+import sqlite3
 import subprocess
 import time
 import uuid
@@ -17,7 +18,23 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, Field
 
 from . import db
+from .auth import (
+    AVATARS,
+    clear_session_cookie,
+    create_session,
+    current_user,
+    hash_password,
+    normalize_email,
+    public_user,
+    require_user,
+    revoke_other_sessions,
+    revoke_session,
+    set_session_cookie,
+    valid_email,
+    verify_password,
+)
 from .config import settings
+from .facts import get_facts
 from .import_sources import SUPPORTED_HINT, default_title, validate_import_url
 from .services import media
 from .services.asr import asr_status
@@ -51,6 +68,28 @@ class AskRequest(BaseModel):
     limit: int = Field(default=5, ge=3, le=8)
 
 
+class RegisterRequest(BaseModel):
+    name: str = Field(default="", max_length=40)
+    email: str = Field(min_length=5, max_length=200)
+    password: str = Field(min_length=8, max_length=200)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=200)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class ProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=40)
+    bio: str | None = Field(default=None, max_length=180)
+    avatar: str | None = Field(default=None, max_length=20)
+
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
+
+
 def _get_lecture(lecture_id: str) -> dict:
     with db.db() as conn:
         row = conn.execute("SELECT * FROM lectures WHERE id=?", (lecture_id,)).fetchone()
@@ -70,11 +109,54 @@ def _counts(lecture_id: str) -> dict:
     return {"segments_count": int(segments), "chapters_count": int(chapters)}
 
 
+def _favorite_ids(conn: sqlite3.Connection, user_id: str | None) -> set[str]:
+    if not user_id:
+        return set()
+    rows = conn.execute(
+        "SELECT lecture_id FROM favorites WHERE user_id=?", (user_id,)
+    ).fetchall()
+    return {row["lecture_id"] for row in rows}
+
+
+def _lecture_items(conn: sqlite3.Connection, rows, favorite_ids: set[str]) -> list[dict]:
+    ids = [row["id"] for row in rows]
+    segment_counts: dict[str, int] = {}
+    chapter_counts: dict[str, int] = {}
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        segment_counts = {
+            row["lecture_id"]: int(row["c"])
+            for row in conn.execute(
+                f"SELECT lecture_id, COUNT(*) AS c FROM segments "
+                f"WHERE lecture_id IN ({placeholders}) GROUP BY lecture_id",
+                ids,
+            ).fetchall()
+        }
+        chapter_counts = {
+            row["lecture_id"]: int(row["c"])
+            for row in conn.execute(
+                f"SELECT lecture_id, COUNT(*) AS c FROM chapters "
+                f"WHERE lecture_id IN ({placeholders}) GROUP BY lecture_id",
+                ids,
+            ).fetchall()
+        }
+    items = []
+    for row in rows:
+        item = db.lecture_public(dict(row))
+        item["segments_count"] = segment_counts.get(item["id"], 0)
+        item["chapters_count"] = chapter_counts.get(item["id"], len(item.get("chapters") or []))
+        item["is_favorite"] = item["id"] in favorite_ids
+        items.append(item)
+    return items
+
+
 @router.get("/lectures")
 def list_lectures(
+    request: Request,
     status: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict:
+    user = current_user(request)
     with db.db() as conn:
         if status:
             rows = conn.execute(
@@ -85,25 +167,24 @@ def list_lectures(
             rows = conn.execute(
                 "SELECT * FROM lectures ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
-        counts = {
-            row["lecture_id"]: row["c"]
-            for row in conn.execute(
-                "SELECT lecture_id, COUNT(*) AS c FROM segments GROUP BY lecture_id"
-            ).fetchall()
-        }
-    items = []
-    for row in rows:
-        item = db.lecture_public(dict(row))
-        item["segments_count"] = int(counts.get(item["id"], 0))
-        item["chapters_count"] = len(item.get("chapters") or [])
-        items.append(item)
+        favorite_ids = _favorite_ids(conn, user["id"] if user else None)
+        items = _lecture_items(conn, rows, favorite_ids)
     return {"items": items, "count": len(items)}
 
 
 @router.get("/lectures/{lecture_id}")
-def get_lecture(lecture_id: str) -> dict:
+def get_lecture(lecture_id: str, request: Request) -> dict:
+    user = current_user(request)
     lecture = _get_lecture(lecture_id)
     lecture.update(_counts(lecture_id))
+    lecture["is_favorite"] = False
+    if user:
+        with db.db() as conn:
+            favorite = conn.execute(
+                "SELECT 1 FROM favorites WHERE user_id=? AND lecture_id=?",
+                (user["id"], lecture_id),
+            ).fetchone()
+            lecture["is_favorite"] = bool(favorite)
     if lecture.get("status") == "ready":
         # Страница обработки опрашивает API каждые пару секунд — не накручиваем
         # просмотры до того, как лекция действительно открыта для просмотра.
@@ -267,11 +348,13 @@ def stream_media_head(lecture_id: str):
 
 @router.post("/lectures/upload", status_code=202)
 async def upload_lecture(
+    request: Request,
     file: UploadFile = File(...),
     title: str = Form(default=""),
     description: str = Form(default=""),
     language: str = Form(default="auto"),
 ) -> dict:
+    user = current_user(request)
     filename = media.sanitize_filename(file.filename or "lecture", "lecture")
     suffix = Path(filename).suffix.lower()
     if suffix not in settings.allowed_media_ext:
@@ -320,13 +403,14 @@ async def upload_lecture(
         conn.execute(
             """INSERT INTO lectures
                (id, title, description, source_type, original_filename, media_path, media_mime,
-                media_size, duration, language, status, stage, progress, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                media_size, duration, language, status, stage, progress, owner_id,
+                created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 lecture_id, clean_title, description.strip()[:3000], "upload", filename,
                 str(destination), info["mime"], size, info["duration"],
                 None if language == "auto" else language,
-                "queued", "В очереди", 0, now, now,
+                "queued", "В очереди", 0, user["id"] if user else None, now, now,
             ),
         )
     MANAGER.submit(lecture_id)
@@ -341,7 +425,8 @@ def _validate_import_url(url: str) -> str:
 
 
 @router.post("/lectures/import", status_code=202)
-def import_lecture(payload: ImportRequest) -> dict:
+def import_lecture(payload: ImportRequest, request: Request) -> dict:
+    user = current_user(request)
     url = _validate_import_url(payload.url)
     lecture_id = uuid.uuid4().hex[:16]
     title = payload.title.strip()[:240] or default_title(url)
@@ -350,12 +435,12 @@ def import_lecture(payload: ImportRequest) -> dict:
         conn.execute(
             """INSERT INTO lectures
                (id, title, description, source_type, source_url, language,
-                status, stage, progress, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                status, stage, progress, owner_id, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 lecture_id, title, "", "url", url,
                 None if payload.language == "auto" else payload.language,
-                "queued", "В очереди", 0, now, now,
+                "queued", "В очереди", 0, user["id"] if user else None, now, now,
             ),
         )
     MANAGER.submit(lecture_id)
@@ -482,6 +567,205 @@ def ask(lecture_id: str, payload: AskRequest) -> dict:
         return service.ask(lecture_id, payload.question, limit=payload.limit)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/facts")
+def facts(
+    limit: int = Query(default=8, ge=1, le=24),
+    exclude: str = Query(default="", max_length=500),
+) -> dict:
+    excluded = {part.strip() for part in exclude.split(",") if part.strip()}
+    items = get_facts(limit=limit, exclude=excluded)
+    return {"items": items, "count": len(items)}
+
+
+# ------------------------------------------------------------------ аккаунты
+
+
+@router.post("/auth/register", status_code=201)
+def register(payload: RegisterRequest, request: Request, response: Response) -> dict:
+    email = normalize_email(payload.email)
+    if not valid_email(email):
+        raise HTTPException(422, "Введите корректный email, например name@example.com.")
+    if not payload.password.strip():
+        raise HTTPException(422, "Пароль не может состоять только из пробелов.")
+    name = " ".join(payload.name.split())[:40]
+    if not name:
+        name = email.split("@")[0].replace(".", " ").replace("_", " ").strip()[:40] or "Слушатель"
+    user_id = uuid.uuid4().hex[:16]
+    now = db.now_iso()
+    password_hash = hash_password(payload.password)
+    try:
+        with db.db() as conn:
+            existing = conn.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone()
+            if existing:
+                raise HTTPException(409, "Аккаунт с таким email уже существует. Попробуйте войти.")
+            conn.execute(
+                """INSERT INTO users
+                   (id, email, name, bio, avatar, password_hash, created_at, updated_at, last_login_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (user_id, email, name, "", "lime", password_hash, now, now, now),
+            )
+            token = create_session(conn, user_id, request)
+            row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    except HTTPException:
+        raise
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, "Аккаунт с таким email уже существует. Попробуйте войти.") from exc
+    set_session_cookie(response, token, request)
+    return {"user": public_user(row)}
+
+
+@router.post("/auth/login")
+def login(payload: LoginRequest, request: Request, response: Response) -> dict:
+    email = normalize_email(payload.email)
+    with db.db() as conn:
+        row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        if not row or not verify_password(payload.password, row["password_hash"]):
+            raise HTTPException(401, "Неверный email или пароль.")
+        now = db.now_iso()
+        conn.execute(
+            "UPDATE users SET last_login_at=?, updated_at=? WHERE id=?",
+            (now, now, row["id"]),
+        )
+        token = create_session(conn, row["id"], request)
+        fresh = conn.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
+    set_session_cookie(response, token, request)
+    return {"user": public_user(fresh)}
+
+
+@router.post("/auth/logout")
+def logout(request: Request, response: Response) -> dict:
+    revoke_session(request)
+    clear_session_cookie(response)
+    return {"ok": True}
+
+
+@router.get("/auth/me")
+def me(request: Request) -> dict:
+    user = current_user(request)
+    if not user:
+        raise HTTPException(401, "Вы не вошли в аккаунт.")
+    return {"user": user}
+
+
+@router.patch("/auth/profile")
+def update_profile(payload: ProfileUpdate, request: Request) -> dict:
+    user = require_user(request)
+    fields: dict[str, str] = {}
+    if payload.name is not None:
+        name = " ".join(payload.name.split())[:40]
+        if not name:
+            raise HTTPException(422, "Имя не может быть пустым.")
+        fields["name"] = name
+    if payload.bio is not None:
+        fields["bio"] = payload.bio.strip()[:180]
+    if payload.avatar is not None:
+        if payload.avatar not in AVATARS:
+            raise HTTPException(422, "Неизвестный цвет аватара.")
+        fields["avatar"] = payload.avatar
+    if not fields:
+        return {"user": user}
+    fields["updated_at"] = db.now_iso()
+    columns = ", ".join(f"{key}=?" for key in fields)
+    with db.db() as conn:
+        conn.execute(
+            f"UPDATE users SET {columns} WHERE id=?",
+            (*fields.values(), user["id"]),
+        )
+        row = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+    return {"user": public_user(row)}
+
+
+@router.post("/auth/password")
+def change_password(payload: PasswordChange, request: Request) -> dict:
+    user = require_user(request)
+    with db.db() as conn:
+        row = conn.execute("SELECT password_hash FROM users WHERE id=?", (user["id"],)).fetchone()
+        if not row or not verify_password(payload.current_password, row["password_hash"]):
+            raise HTTPException(401, "Текущий пароль указан неверно.")
+        if not payload.new_password.strip():
+            raise HTTPException(422, "Новый пароль не может состоять только из пробелов.")
+        conn.execute(
+            "UPDATE users SET password_hash=?, updated_at=? WHERE id=?",
+            (hash_password(payload.new_password), db.now_iso(), user["id"]),
+        )
+    revoke_other_sessions(request, user["id"])
+    return {"ok": True, "message": "Пароль обновлён. Остальные сеансы завершены."}
+
+
+@router.get("/profile")
+def profile(request: Request) -> dict:
+    user = require_user(request)
+    with db.db() as conn:
+        favorite_rows = conn.execute(
+            """SELECT l.* FROM favorites f
+               JOIN lectures l ON l.id = f.lecture_id
+               WHERE f.user_id=? ORDER BY f.created_at DESC""",
+            (user["id"],),
+        ).fetchall()
+        owned_rows = conn.execute(
+            "SELECT * FROM lectures WHERE owner_id=? ORDER BY created_at DESC LIMIT 100",
+            (user["id"],),
+        ).fetchall()
+        favorite_ids = _favorite_ids(conn, user["id"])
+        favorites = _lecture_items(conn, favorite_rows, favorite_ids)
+        lectures = _lecture_items(conn, owned_rows, favorite_ids)
+        owned_stats = conn.execute(
+            """SELECT COUNT(*) AS total, COALESCE(SUM(views), 0) AS views,
+                      COALESCE(SUM(duration), 0) AS duration
+               FROM lectures WHERE owner_id=?""",
+            (user["id"],),
+        ).fetchone()
+    return {
+        "user": user,
+        "stats": {
+            "favorites": len(favorites),
+            "uploads": int(owned_stats["total"] or 0),
+            "views": int(owned_stats["views"] or 0),
+            "hours": round(float(owned_stats["duration"] or 0) / 3600, 1),
+        },
+        "favorites": favorites,
+        "lectures": lectures,
+    }
+
+
+@router.get("/favorites")
+def list_favorites(request: Request) -> dict:
+    user = require_user(request)
+    with db.db() as conn:
+        rows = conn.execute(
+            """SELECT l.* FROM favorites f
+               JOIN lectures l ON l.id = f.lecture_id
+               WHERE f.user_id=? ORDER BY f.created_at DESC""",
+            (user["id"],),
+        ).fetchall()
+        items = _lecture_items(conn, rows, _favorite_ids(conn, user["id"]))
+    return {"items": items, "count": len(items)}
+
+
+@router.post("/favorites/{lecture_id}")
+def toggle_favorite(lecture_id: str, request: Request) -> dict:
+    user = require_user(request)
+    _get_lecture(lecture_id)
+    with db.db() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM favorites WHERE user_id=? AND lecture_id=?",
+            (user["id"], lecture_id),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "DELETE FROM favorites WHERE user_id=? AND lecture_id=?",
+                (user["id"], lecture_id),
+            )
+            favorited = False
+        else:
+            conn.execute(
+                "INSERT INTO favorites(user_id, lecture_id, created_at) VALUES(?,?,?)",
+                (user["id"], lecture_id, db.now_iso()),
+            )
+            favorited = True
+    return {"lecture_id": lecture_id, "favorited": favorited}
 
 
 @router.get("/stats")

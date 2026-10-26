@@ -72,6 +72,21 @@ export const api = {
   importUrl: (payload) =>
     request("/api/lectures/import", { method: "POST", body: payload }),
 
+  facts: (limit = 8) => request(`/api/facts?limit=${encodeURIComponent(limit)}`),
+
+  me: () => request("/api/auth/me"),
+  register: (payload) => request("/api/auth/register", { method: "POST", body: payload }),
+  login: (payload) => request("/api/auth/login", { method: "POST", body: payload }),
+  logout: () => request("/api/auth/logout", { method: "POST" }),
+  updateProfile: (payload) =>
+    request("/api/auth/profile", { method: "PATCH", body: payload }),
+  changePassword: (payload) =>
+    request("/api/auth/password", { method: "POST", body: payload }),
+  profile: () => request("/api/profile"),
+  favorites: () => request("/api/favorites"),
+  toggleFavorite: (id) =>
+    request(`/api/favorites/${encodeURIComponent(id)}`, { method: "POST" }),
+
   exportUrl: (id) => `/api/lectures/${encodeURIComponent(id)}/export`,
   subtitlesUrl: (id, format = "vtt", download = false) =>
     `/api/lectures/${encodeURIComponent(id)}/subtitles.${format}${download ? "?download=true" : ""}`,

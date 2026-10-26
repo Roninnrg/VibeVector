@@ -11,6 +11,19 @@ from typing import Any, Iterator
 from .config import settings
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    name TEXT NOT NULL,
+    bio TEXT NOT NULL DEFAULT '',
+    avatar TEXT NOT NULL DEFAULT 'lime',
+    password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_login_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE);
+
 CREATE TABLE IF NOT EXISTS lectures (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -36,6 +49,7 @@ CREATE TABLE IF NOT EXISTS lectures (
     embedding_provider TEXT,
     llm_used INTEGER NOT NULL DEFAULT 0,
     views INTEGER NOT NULL DEFAULT 0,
+    owner_id TEXT REFERENCES users(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     processed_at TEXT
@@ -81,6 +95,25 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_agent TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS favorites (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    lecture_id TEXT NOT NULL REFERENCES lectures(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, lecture_id)
+);
+CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_favorites_lecture ON favorites(lecture_id);
+
 CREATE TABLE IF NOT EXISTS app_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -120,14 +153,31 @@ def db(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 def init_db(db_path: Path | None = None) -> None:
     with db(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.execute(
             "INSERT INTO app_meta(key, value) VALUES('index_version', '1') "
             "ON CONFLICT(key) DO NOTHING"
         )
         conn.execute(
-            "INSERT INTO app_meta(key, value) VALUES('schema_version', '1') "
-            "ON CONFLICT(key) DO NOTHING"
+            "INSERT INTO app_meta(key, value) VALUES('schema_version', '2') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
         )
+
+
+def _ensure_column(
+    conn: sqlite3.Connection, table: str, column: str, definition: str
+) -> None:
+    columns = {
+        row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Аккуратно обновляет базу, созданную предыдущими версиями."""
+    _ensure_column(conn, "lectures", "owner_id", "TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_lectures_owner ON lectures(owner_id)")
 
 
 def get_meta(key: str, default: str | None = None) -> str | None:

@@ -1,4 +1,6 @@
 import { api } from "../api.js";
+import { getUser, loadAuth } from "../auth.js";
+import { loadFacts, mountFacts } from "../facts.js";
 import { playerMarkup, VectorPlayer } from "../player.js";
 import {
   copyText,
@@ -123,6 +125,7 @@ function processingMarkup(lecture) {
                 </div>`).join("")}
             </div>
           </div>
+          <div class="fact-slot" data-processing-facts></div>
           <div class="card card-pad">
             <div class="eyebrow" style="margin-bottom:9px">Что происходит</div>
             <p class="muted" style="font-size:13px;line-height:1.7">
@@ -208,6 +211,8 @@ export function mount(root, ctx) {
   let activeChapter = -1;
   let qaBusy = false;
   let lastChapter = -1;
+  let factsCleanup = null;
+  let favoriteBusy = false;
 
   ctx.setTitle("Лекция — Вектор");
 
@@ -507,6 +512,10 @@ export function mount(root, ctx) {
       <div class="aside-section">
         <div class="aside-section-head"><h4>Действия</h4></div>
         <div class="aside-actions">
+          <button class="btn btn-sm btn-favorite${lecture.is_favorite ? " active" : ""}" type="button"
+                  data-favorite aria-pressed="${lecture.is_favorite ? "true" : "false"}">
+            ${icon("bookmark")}<span data-favorite-label>${lecture.is_favorite ? "В избранном" : "В избранное"}</span>
+          </button>
           <a class="btn btn-sm" href="${api.exportUrl(lecture.id)}" download>${icon("download")} Скачать конспект</a>
           <a class="btn btn-sm" href="${api.subtitlesUrl(lecture.id, "vtt", true)}" download>${icon("subtitles")} Субтитры VTT</a>
           <button class="btn btn-sm" type="button" data-reprocess>${icon("refresh")} Обработать заново</button>
@@ -536,6 +545,11 @@ export function mount(root, ctx) {
             <div style="margin-top:12px">${headMarkup(lecture)}</div>
           </div>
           <div class="head-actions">
+            <button class="btn btn-sm btn-favorite${lecture.is_favorite ? " active" : ""}" type="button"
+                    data-favorite aria-pressed="${lecture.is_favorite ? "true" : "false"}"
+                    title="${lecture.is_favorite ? "Убрать из избранного" : "Добавить в избранное"}">
+              ${icon("bookmark")}<span data-favorite-label>${lecture.is_favorite ? "В избранном" : "В избранное"}</span>
+            </button>
             <a class="btn btn-sm" href="${api.exportUrl(lecture.id)}" download title="Скачать конспект в Markdown">
               ${icon("download")} Конспект
             </a>
@@ -778,6 +792,57 @@ export function mount(root, ctx) {
     root.querySelectorAll("[data-delete]").forEach((button) => {
       button.addEventListener("click", () => remove());
     });
+    root.querySelectorAll("[data-favorite]").forEach((button) => {
+      button.addEventListener("click", () => toggleFavorite());
+    });
+  }
+
+  function mountProcessingFacts() {
+    if (typeof factsCleanup === "function") {
+      factsCleanup();
+      factsCleanup = null;
+    }
+    const host = root.querySelector("[data-processing-facts]");
+    if (!host) return;
+    loadFacts(7).then((items) => {
+      if (cancelled || !host.isConnected) return;
+      factsCleanup = mountFacts(host, items, { interval: 9000 });
+    });
+  }
+
+  function updateFavoriteButtons() {
+    root.querySelectorAll("[data-favorite]").forEach((button) => {
+      const active = Boolean(lecture?.is_favorite);
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      button.title = active ? "Убрать из избранного" : "Добавить в избранное";
+      const label = button.querySelector("[data-favorite-label]");
+      if (label) label.textContent = active ? "В избранном" : "В избранное";
+    });
+  }
+
+  async function toggleFavorite() {
+    if (favoriteBusy) return;
+    favoriteBusy = true;
+    try {
+      if (!getUser()) await loadAuth();
+      if (!getUser()) {
+        toast("Войдите или создайте аккаунт, чтобы сохранять лекции в избранное.", "info");
+        ctx.navigate("/profile");
+        return;
+      }
+      const result = await api.toggleFavorite(lecture.id);
+      lecture.is_favorite = Boolean(result.favorited);
+      updateFavoriteButtons();
+      toast(
+        lecture.is_favorite ? "Лекция добавлена в избранное." : "Лекция убрана из избранного.",
+        "success",
+      );
+    } catch (error) {
+      toast(error.message || "Не удалось обновить избранное.", "error");
+    } finally {
+      favoriteBusy = false;
+    }
   }
 
   // ---------------------------------------------------------------- actions
@@ -877,6 +942,7 @@ export function mount(root, ctx) {
         failureBuilt = false;
         readyBuilt = false;
         setupAside();
+        mountProcessingFacts();
       } else {
         updateProcessing(data);
       }
@@ -914,6 +980,8 @@ export function mount(root, ctx) {
   return () => {
     cancelled = true;
     clearTimeout(pollTimer);
+    if (typeof factsCleanup === "function") factsCleanup();
+    factsCleanup = null;
     player?.destroy();
     player = null;
   };

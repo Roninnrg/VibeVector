@@ -1,4 +1,5 @@
 import { api } from "./api.js";
+import { loadFacts, mountFacts } from "./facts.js";
 import { escapeHtml, formatBytes, icon, toast } from "./utils.js";
 
 const LANGUAGES = [
@@ -28,6 +29,8 @@ export function openUpload({ navigate, onCreated } = {}) {
   let activeTab = "file";
   let selectedFile = null;
   let uploading = false;
+  let closed = false;
+  let factsCleanup = null;
 
   root.innerHTML = `
   <div class="modal-backdrop" data-backdrop>
@@ -112,6 +115,7 @@ export function openUpload({ navigate, onCreated } = {}) {
             </button>
           </div>
         </form>
+        <div class="fact-slot" data-facts></div>
       </div>
     </div>
   </div>`;
@@ -132,6 +136,12 @@ export function openUpload({ navigate, onCreated } = {}) {
   const fileFill = fileForm.querySelector("[data-fill]");
   const filePct = fileForm.querySelector("[data-pct]");
   const linkSubmit = linkForm.querySelector("[data-submit]");
+  const factsHost = root.querySelector("[data-facts]");
+
+  loadFacts(8).then((items) => {
+    if (closed || !factsHost) return;
+    factsCleanup = mountFacts(factsHost, items, { interval: 9000 });
+  });
 
   function setTab(tab) {
     activeTab = tab;
@@ -301,6 +311,11 @@ export function openUpload({ navigate, onCreated } = {}) {
     if (uploading && !force) {
       toast("Дождитесь завершения загрузки.", "info");
       return;
+    }
+    closed = true;
+    if (typeof factsCleanup === "function") {
+      factsCleanup();
+      factsCleanup = null;
     }
     document.removeEventListener("keydown", onKeyDown, true);
     root.innerHTML = "";

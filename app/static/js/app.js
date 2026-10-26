@@ -1,15 +1,18 @@
 import { api } from "./api.js";
+import { avatarClass, initials, loadAuth, subscribeAuth } from "./auth.js";
 import { openUpload } from "./upload.js";
 import { mount as mountHome } from "./pages/home.js";
 import { mount as mountSearch } from "./pages/search.js";
 import { mount as mountLecture } from "./pages/lecture.js";
 import { mount as mountDiagnostics } from "./pages/diagnostics.js";
-import { icon, scrollToTop } from "./utils.js";
+import { mount as mountProfile } from "./pages/profile.js";
+import { escapeHtml, icon, scrollToTop } from "./utils.js";
 
 const main = document.getElementById("main");
 const globalForm = document.getElementById("global-search");
 const globalInput = document.getElementById("global-q");
 const uploadButton = document.getElementById("open-upload");
+const accountChip = document.getElementById("account-chip");
 const modeChip = document.getElementById("mode-chip");
 const modeLabel = document.getElementById("mode-label");
 
@@ -17,6 +20,7 @@ const ROUTES = [
   { pattern: /^\/$/, mount: mountHome, title: "Вектор — найдите момент, а не таймкод", nav: "home" },
   { pattern: /^\/search$/, mount: mountSearch, title: "Поиск по лекциям — Вектор", nav: "search" },
   { pattern: /^\/lecture\/([^/]+)$/, mount: mountLecture, title: "Лекция — Вектор", nav: "home" },
+  { pattern: /^\/profile$/, mount: mountProfile, title: "Профиль — Вектор", nav: "profile" },
   { pattern: /^\/diagnostics$/, mount: mountDiagnostics, title: "Диагностика — Вектор", nav: "diagnostics" },
 ];
 
@@ -53,6 +57,26 @@ function setActiveNav(name) {
 
 function setTitle(title) {
   document.title = title || BASE_TITLE;
+}
+
+function renderAccount(user) {
+  if (!accountChip) return;
+  if (user) {
+    const first = String(user.name || "").trim().split(/\s+/)[0] || "Профиль";
+    accountChip.innerHTML = `
+      <span class="account-avatar ${avatarClass(user.avatar)}">${escapeHtml(initials(user.name))}</span>
+      <span class="account-name">${escapeHtml(first)}</span>`;
+    accountChip.setAttribute("aria-label", `Профиль: ${user.name}`);
+    accountChip.title = `${user.name} · ${user.email}`;
+    accountChip.classList.add("signed-in");
+  } else {
+    accountChip.innerHTML = `
+      <span class="account-avatar guest">${icon("user")}</span>
+      <span class="account-name">Войти</span>`;
+    accountChip.setAttribute("aria-label", "Войти в аккаунт");
+    accountChip.title = "Войти или зарегистрироваться";
+    accountChip.classList.remove("signed-in");
+  }
 }
 
 function notFoundMarkup() {
@@ -277,6 +301,8 @@ document.addEventListener("visibilitychange", () => {
 
 // ------------------------------------------------------------------ boot
 syncHeader(currentUrl().searchParams);
+subscribeAuth(renderAccount);
+loadAuth();
 refreshHealth();
 clearInterval(healthTimer);
 healthTimer = setInterval(refreshHealth, 60000);
