@@ -1,0 +1,23 @@
+# Нормализация переводов строк между Windows, Linux и macOS.
+* text=auto
+
+*.py text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+*.mp4 binary
+*.webm binary
+*.mp3 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pptx binary
+*.woff2 binary

@@ -1,0 +1,19 @@
+# Каталог данных (БД, медиа, модели) создаётся автоматически
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Данные и тяжёлые бинарники не коммитим
+data/
+tools/ffmpeg/
+*.log
+
+# Локальные настройки и артефакты ОС
+.env
+.DS_Store
+Thumbs.db
+desktop.ini
