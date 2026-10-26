@@ -1,5 +1,6 @@
 import { api } from "./api.js";
 import { loadFacts, mountFacts } from "./facts.js";
+import { mountSnake } from "./snake.js";
 import { escapeHtml, formatBytes, icon, toast } from "./utils.js";
 
 const LANGUAGES = [
@@ -32,6 +33,7 @@ export function openUpload({ navigate, onCreated } = {}) {
   let uploadController = null;
   let closed = false;
   let factsCleanup = null;
+  let gameCleanup = null;
 
   root.innerHTML = `
   <div class="modal-backdrop" data-backdrop>
@@ -116,6 +118,7 @@ export function openUpload({ navigate, onCreated } = {}) {
             </button>
           </div>
         </form>
+        <div class="game-slot hidden" data-game></div>
         <div class="fact-slot" data-facts></div>
       </div>
     </div>
@@ -169,6 +172,13 @@ export function openUpload({ navigate, onCreated } = {}) {
   function hideError(form) {
     const box = form.querySelector("[data-error]");
     if (box) box.classList.add("hidden");
+  }
+
+  function showGame() {
+    const host = root.querySelector("[data-game]");
+    if (!host) return;
+    host.classList.remove("hidden");
+    if (!gameCleanup) gameCleanup = mountSnake(host);
   }
 
   function chooseFile(file) {
@@ -263,6 +273,7 @@ export function openUpload({ navigate, onCreated } = {}) {
     const controller = uploadController;
     const title = fileForm.querySelector('[name="title"]').value.trim();
     const language = fileForm.querySelector('[name="language"]').value;
+    showGame();
     try {
       const lecture = await api.upload(selectedFile, {
         title,
@@ -332,6 +343,10 @@ export function openUpload({ navigate, onCreated } = {}) {
     if (typeof factsCleanup === "function") {
       factsCleanup();
       factsCleanup = null;
+    }
+    if (typeof gameCleanup === "function") {
+      gameCleanup();
+      gameCleanup = null;
     }
     document.removeEventListener("keydown", onKeyDown, true);
     root.innerHTML = "";

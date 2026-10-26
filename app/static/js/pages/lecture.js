@@ -2,6 +2,7 @@ import { api } from "../api.js";
 import { getUser, loadAuth } from "../auth.js";
 import { loadFacts, mountFacts } from "../facts.js";
 import { playerMarkup, VectorPlayer } from "../player.js";
+import { mountSnake } from "../snake.js";
 import {
   copyText,
   escapeHtml,
@@ -110,6 +111,7 @@ function processingMarkup(lecture) {
       </header>
       <div class="lecture-layout">
         <div class="lecture-main">
+          <div class="game-slot" data-processing-game></div>
           <div class="processing-shell">
             <span class="spinner"></span>
             <div class="eyebrow">Идёт обработка</div>
@@ -212,6 +214,7 @@ export function mount(root, ctx) {
   let qaBusy = false;
   let lastChapter = -1;
   let factsCleanup = null;
+  let gameCleanup = null;
   let favoriteBusy = false;
 
   ctx.setTitle("Лекция — Вектор");
@@ -797,6 +800,20 @@ export function mount(root, ctx) {
     });
   }
 
+  function destroyProcessingGame() {
+    if (typeof gameCleanup === "function") {
+      gameCleanup();
+      gameCleanup = null;
+    }
+  }
+
+  function mountProcessingGame() {
+    destroyProcessingGame();
+    const host = root.querySelector("[data-processing-game]");
+    if (!host) return;
+    gameCleanup = mountSnake(host);
+  }
+
   function mountProcessingFacts() {
     if (typeof factsCleanup === "function") {
       factsCleanup();
@@ -941,11 +958,15 @@ export function mount(root, ctx) {
       lecture = data;
       ctx.setTitle(`${data.title} — Вектор`);
       if (data.status === "ready") {
-        if (!readyBuilt) await loadReady();
+        if (!readyBuilt) {
+          destroyProcessingGame();
+          await loadReady();
+        }
         return;
       }
       if (data.status === "failed") {
         if (!failureBuilt || previousStatus !== "failed") {
+          destroyProcessingGame();
           root.innerHTML = failureMarkup(data);
           failureBuilt = true;
           readyBuilt = false;
@@ -961,6 +982,7 @@ export function mount(root, ctx) {
         failureBuilt = false;
         readyBuilt = false;
         setupAside();
+        mountProcessingGame();
         mountProcessingFacts();
       } else {
         updateProcessing(data);
@@ -1001,6 +1023,7 @@ export function mount(root, ctx) {
     clearTimeout(pollTimer);
     if (typeof factsCleanup === "function") factsCleanup();
     factsCleanup = null;
+    destroyProcessingGame();
     player?.destroy();
     player = null;
   };
