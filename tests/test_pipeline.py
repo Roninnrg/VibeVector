@@ -149,6 +149,22 @@ class TestProcessLecture:
         assert lecture["progress"] == 0
         assert "Речь не распознана" in lecture["error"]
 
+    def test_video_without_audio_sets_clear_error(self, patched_pipeline):
+        create_lecture("silent-lecture")
+        info = FakeInfo.as_probe()
+        info["has_audio"] = False
+        patched_pipeline.setattr(pipeline, "probe", lambda path: info)
+
+        with pytest.raises(pipeline.MediaError):
+            pipeline.process_lecture("silent-lecture")
+
+        with db.db() as conn:
+            lecture = dict(conn.execute(
+                "SELECT * FROM lectures WHERE id='silent-lecture'"
+            ).fetchone())
+        assert lecture["status"] == "failed"
+        assert "аудиодорожки" in lecture["error"]
+
     def test_missing_media_sets_error(self, patched_pipeline):
         create_lecture("missing-lecture")
         with db.db() as conn:

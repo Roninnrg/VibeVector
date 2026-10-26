@@ -321,6 +321,10 @@ def process_lecture(lecture_id: str, force: bool = False) -> None:
             stage="Проверяем файл · 4%",
             original_filename=lecture.get("original_filename") or sanitize_filename(Path(media_path).name),
         )
+        if not info.get("has_audio"):
+            raise MediaError(
+                "В видео нет аудиодорожки — распознавать нечего. Загрузите файл со звуком."
+            )
 
         thumb = Path(settings.thumb_dir) / f"{lecture_id}.jpg"
         if not lecture.get("thumbnail_path") or not Path(lecture["thumbnail_path"]).exists():
