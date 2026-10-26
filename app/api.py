@@ -10,7 +10,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from . import db
 from .config import settings
+from .import_sources import SUPPORTED_HINT, default_title, validate_import_url
 from .services import media
 from .services.asr import asr_status
 from .services.embeddings import embedding_status
@@ -33,10 +34,6 @@ from .text import (
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
-
-YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "music.youtube.com"}
-VIMEO_HOSTS = {"vimeo.com", "www.vimeo.com", "player.vimeo.com"}
-
 
 class ImportRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2000)
@@ -337,23 +334,17 @@ async def upload_lecture(
 
 
 def _validate_import_url(url: str) -> str:
-    parsed = urlparse(url.strip())
-    if parsed.scheme not in {"http", "https"}:
-        raise HTTPException(422, "Ссылка должна начинаться с http:// или https://")
-    host = (parsed.hostname or "").lower()
-    if host not in YOUTUBE_HOSTS and host not in VIMEO_HOSTS:
-        raise HTTPException(422, "Поддерживаются ссылки YouTube и Vimeo.")
-    return url.strip()
+    try:
+        return validate_import_url(url)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc) or SUPPORTED_HINT) from exc
 
 
 @router.post("/lectures/import", status_code=202)
 def import_lecture(payload: ImportRequest) -> dict:
     url = _validate_import_url(payload.url)
     lecture_id = uuid.uuid4().hex[:16]
-    host = (urlparse(url).hostname or "").lower()
-    title = payload.title.strip()[:240] or (
-        "Лекция с YouTube" if host in YOUTUBE_HOSTS else "Лекция с Vimeo"
-    )
+    title = payload.title.strip()[:240] or default_title(url)
     now = db.now_iso()
     with db.db() as conn:
         conn.execute(

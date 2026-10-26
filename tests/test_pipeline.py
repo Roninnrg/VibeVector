@@ -1,6 +1,7 @@
 """Тесты конвейера обработки: ASR→эмбеддинги→конспект→индекс."""
 from __future__ import annotations
 
+import base64
 import sys
 import time
 from pathlib import Path
@@ -364,6 +365,81 @@ class TestRemoteDownload:
         assert message.startswith("Не удалось скачать видео:")
         assert "\x1b[" not in message
         assert "video unavailable" in message
+
+    def test_download_error_explains_bot_protection(self, monkeypatch):
+        class BlockedYoutubeDL:
+            def __init__(self, options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def extract_info(self, url, download=True):
+                raise RuntimeError(
+                    "\x1b[0;31mERROR:\x1b[0m [youtube] abc: Sign in to confirm "
+                    "you're not a bot. This helps protect our community."
+                )
+
+        fake_module = type("FakeYTDLP", (), {"YoutubeDL": BlockedYoutubeDL})
+        monkeypatch.setitem(sys.modules, "yt_dlp", fake_module)
+        create_lecture("remote-blocked")
+
+        with pytest.raises(pipeline.MediaError) as info:
+            pipeline._download_remote(
+                "remote-blocked", "https://youtu.be/blocked", lambda *a: None
+            )
+
+        message = str(info.value)
+        assert "бот-защита" in message
+        assert "YTDLP_COOKIES_FILE" in message
+        assert "\x1b[" not in message
+        assert message.startswith("Не удалось скачать видео:")
+
+    def test_download_uses_cookies_file(self, monkeypatch, tmp_path):
+        ffmpeg = str(Path(settings.tools_dir) / "ffmpeg" / "bin" / "ffmpeg.exe")
+        cookies = tmp_path / "cookies.txt"
+        cookies.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+        monkeypatch.setenv("YTDLP_COOKIES_FILE", str(cookies))
+        monkeypatch.delenv("YTDLP_COOKIES_B64", raising=False)
+        calls = self._fake_yt_dlp(monkeypatch, ffmpeg)
+        create_lecture("remote-cookies")
+
+        pipeline._download_remote(
+            "remote-cookies", "https://youtu.be/test", lambda *a: None
+        )
+
+        assert calls["options"]["cookiefile"] == str(cookies)
+
+    def test_download_uses_cookies_base64(self, monkeypatch):
+        ffmpeg = str(Path(settings.tools_dir) / "ffmpeg" / "bin" / "ffmpeg.exe")
+        raw = b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n"
+        monkeypatch.delenv("YTDLP_COOKIES_FILE", raising=False)
+        monkeypatch.setenv("YTDLP_COOKIES_B64", base64.b64encode(raw).decode())
+        calls = self._fake_yt_dlp(monkeypatch, ffmpeg)
+        create_lecture("remote-cookies-b64")
+
+        pipeline._download_remote(
+            "remote-cookies-b64", "https://youtu.be/test", lambda *a: None
+        )
+
+        path = Path(calls["options"]["cookiefile"])
+        assert path.read_bytes() == raw
+
+    def test_invalid_cookies_base64_is_ignored(self, monkeypatch):
+        ffmpeg = str(Path(settings.tools_dir) / "ffmpeg" / "bin" / "ffmpeg.exe")
+        monkeypatch.delenv("YTDLP_COOKIES_FILE", raising=False)
+        monkeypatch.setenv("YTDLP_COOKIES_B64", "%%% not base64 %%%")
+        calls = self._fake_yt_dlp(monkeypatch, ffmpeg)
+        create_lecture("remote-cookies-bad")
+
+        pipeline._download_remote(
+            "remote-cookies-bad", "https://youtu.be/test", lambda *a: None
+        )
+
+        assert "cookiefile" not in calls["options"]
 
 
 @pytest.mark.integration

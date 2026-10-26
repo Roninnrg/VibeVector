@@ -144,7 +144,7 @@ export function mount(root, ctx) {
           ${icon("upload")}
           <div class="num">01 / ЗАГРУЗКА</div>
           <h3>Добавьте лекцию</h3>
-          <p>MP4, WebM, MOV или ссылка на YouTube. Файл остаётся на вашем сервере.</p>
+          <p>MP4, WebM, MOV или ссылка на YouTube, VK Видео, Rutube. Файл остаётся на вашем сервере.</p>
         </div>
         <div class="how-step">
           ${icon("mic")}

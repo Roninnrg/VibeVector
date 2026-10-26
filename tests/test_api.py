@@ -321,12 +321,56 @@ class TestUploadAndImport:
             "/api/lectures/import", json={"url": "https://example.com/video"}
         )
         assert response.status_code == 422
+        assert "VK Видео" in response.json()["detail"]
 
     def test_import_rejects_bad_scheme(self, client):
         response = client.post(
             "/api/lectures/import", json={"url": "ftp://youtube.com/watch?v=1"}
         )
         assert response.status_code == 422
+
+    def test_import_rejects_private_host(self, client):
+        for url in ("http://127.0.0.1/video.mp4", "http://localhost/video.mp4"):
+            response = client.post("/api/lectures/import", json={"url": url})
+            assert response.status_code == 422, url
+
+    def test_import_accepts_vk(self, client, monkeypatch):
+        monkeypatch.setattr("app.api.MANAGER.submit", lambda *a, **k: True)
+        response = client.post(
+            "/api/lectures/import",
+            json={"url": "https://vk.com/video-220754053_456239017"},
+        )
+        assert response.status_code == 202
+        assert response.json()["title"] == "Лекция с VK Видео"
+
+    def test_import_accepts_rutube(self, client, monkeypatch):
+        monkeypatch.setattr("app.api.MANAGER.submit", lambda *a, **k: True)
+        response = client.post(
+            "/api/lectures/import",
+            json={"url": "https://rutube.ru/video/00eae1f20c1691017897cd8fcac68722/"},
+        )
+        assert response.status_code == 202
+        assert response.json()["title"] == "Лекция с Rutube"
+
+    def test_import_accepts_dailymotion(self, client, monkeypatch):
+        monkeypatch.setattr("app.api.MANAGER.submit", lambda *a, **k: True)
+        response = client.post(
+            "/api/lectures/import",
+            json={"url": "https://www.dailymotion.com/video/x8j2s9k"},
+        )
+        assert response.status_code == 202
+        assert response.json()["title"] == "Лекция с Dailymotion"
+
+    def test_import_accepts_direct_video(self, client, monkeypatch):
+        monkeypatch.setattr("app.api.MANAGER.submit", lambda *a, **k: True)
+        response = client.post(
+            "/api/lectures/import",
+            json={"url": "https://cdn.example.org/lecture.mp4?token=abc"},
+        )
+        assert response.status_code == 202
+        payload = response.json()
+        assert payload["title"] == "Видео по ссылке"
+        assert payload["source_url"].startswith("https://cdn.example.org/lecture.mp4")
 
     def test_import_youtube(self, client, monkeypatch):
         monkeypatch.setattr("app.api.MANAGER.submit", lambda *a, **k: True)

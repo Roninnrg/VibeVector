@@ -5,7 +5,6 @@ import json
 import logging
 import math
 import os
-import re
 import threading
 import time
 import traceback
@@ -17,6 +16,7 @@ import numpy as np
 
 from .. import db
 from ..config import settings
+from ..import_sources import DEFAULT_TITLES, download_error_message
 from ..text import build_chapters, keyword_weights, summarize
 from .asr import get_asr
 from .embeddings import HashingEmbedder, get_embedder, set_embedder
@@ -26,7 +26,6 @@ from .search import get_search_service, reset_search_service
 
 log = logging.getLogger(__name__)
 VIDEO_EXT = {".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi"}
-ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _update(lecture_id: str, **fields) -> None:
@@ -146,6 +145,40 @@ def _proxy_url() -> str | None:
     return _normalize_proxy(str(server)) or None
 
 
+def _cookies_file() -> str | None:
+    """Файл cookies для yt-dlp: путь или base64 в переменной окружения.
+
+    Нужен для YouTube/Vimeo, которые с IP дата-центра требуют авторизацию.
+    """
+    explicit = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    if explicit:
+        path = Path(explicit).expanduser()
+        if path.is_file():
+            return str(path)
+        log.warning("YTDLP_COOKIES_FILE указывает на несуществующий файл: %s", path)
+    encoded = os.getenv("YTDLP_COOKIES_B64", "").strip()
+    if not encoded:
+        return None
+    try:
+        import base64
+
+        data = base64.b64decode(encoded, validate=True)
+    except ValueError:
+        log.warning("YTDLP_COOKIES_B64 содержит некорректный base64")
+        return None
+    if not data.strip():
+        return None
+    path = Path(settings.data_dir) / "yt-dlp-cookies.txt"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists() or path.read_bytes() != data:
+            path.write_bytes(data)
+    except OSError as exc:
+        log.warning("Не удалось сохранить cookies для yt-dlp: %s", exc)
+        return None
+    return str(path)
+
+
 def _download_remote(lecture_id: str, url: str, progress: Callable[[int, str], None]) -> Path:
     try:
         import yt_dlp  # noqa: WPS433
@@ -189,12 +222,14 @@ def _download_remote(lecture_id: str, url: str, progress: Callable[[int, str], N
     if proxy:
         # Python не читает системный прокси Windows — передаём его yt-dlp явно.
         options["proxy"] = proxy
+    cookies = _cookies_file()
+    if cookies:
+        options["cookiefile"] = cookies
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=True)
     except Exception as exc:
-        message = ANSI_RE.sub("", str(exc)).strip()
-        raise MediaError(f"Не удалось скачать видео: {message[:500]}") from exc
+        raise MediaError(download_error_message(str(exc))) from exc
     candidates = [
         item for item in out_dir.glob(f"{lecture_id}.*")
         if item.is_file() and item.suffix.lower() not in {".part", ".ytdl", ".temp"}
@@ -211,7 +246,7 @@ def _download_remote(lecture_id: str, url: str, progress: Callable[[int, str], N
             ).fetchone()
         current = ((row["title"] if row else "") or "").strip()
         # Не затираем имя, которое пользователь указал при импорте.
-        if current in {"", "Лекция с YouTube", "Лекция с Vimeo"}:
+        if not current or current in DEFAULT_TITLES:
             _update(lecture_id, title=str(title)[:240])
     return path
 

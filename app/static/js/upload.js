@@ -81,9 +81,9 @@ export function openUpload({ navigate, onCreated } = {}) {
 
         <form data-panel="link" class="hidden" novalidate>
           <div>
-            <label class="field-label" for="import-url">Ссылка на YouTube или Vimeo</label>
+            <label class="field-label" for="import-url">Ссылка на видео</label>
             <input class="input" id="import-url" name="url" type="url" maxlength="2000"
-                   placeholder="https://www.youtube.com/watch?v=…" autocomplete="off">
+                   placeholder="https://www.youtube.com/watch?v=… или https://vk.com/video…" autocomplete="off">
           </div>
           <div class="form-grid">
             <div>
@@ -97,7 +97,8 @@ export function openUpload({ navigate, onCreated } = {}) {
           </div>
           <p class="import-note">
             <strong>Как это работает.</strong> Сервер скачает видео через yt-dlp, извлечёт аудио и запустит
-            распознавание. Нужен доступ в интернет; файл сохраняется локально.
+            распознавание. Поддерживаются YouTube, Vimeo, VK Видео, Rutube, Dailymotion и прямые ссылки
+            на MP4/WebM. Нужен доступ в интернет; файл сохраняется локально.
           </p>
           <div class="upload-progress" data-progress>
             <div class="line"><span>Добавляем в очередь</span><span>…</span></div>
