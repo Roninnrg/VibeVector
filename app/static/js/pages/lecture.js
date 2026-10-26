@@ -768,8 +768,12 @@ export function mount(root, ctx) {
         ctx.navigate(`/search?q=${encodeURIComponent(button.dataset.term)}&lecture=${encodeURIComponent(lecture.id)}`);
       });
     });
-    root.querySelector("[data-reprocess]")?.addEventListener("click", () => reprocess());
-    root.querySelector("[data-delete]")?.addEventListener("click", () => remove());
+    root.querySelectorAll("[data-reprocess]").forEach((button) => {
+      button.addEventListener("click", () => reprocess());
+    });
+    root.querySelectorAll("[data-delete]").forEach((button) => {
+      button.addEventListener("click", () => remove());
+    });
   }
 
   // ---------------------------------------------------------------- actions
@@ -858,8 +862,9 @@ export function mount(root, ctx) {
           failureBuilt = true;
           readyBuilt = false;
           setupAside();
-          root.querySelector("[data-retry]")?.addEventListener("click", reprocess);
-          root.querySelector("[data-delete]")?.addEventListener("click", remove);
+          root.querySelectorAll("[data-retry]").forEach((button) => {
+            button.addEventListener("click", () => reprocess());
+          });
         }
         return;
       }

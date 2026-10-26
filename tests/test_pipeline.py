@@ -1,6 +1,7 @@
 """Тесты конвейера обработки: ASR→эмбеддинги→конспект→индекс."""
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
@@ -221,6 +222,127 @@ class TestPipelineInternals:
         manager = pipeline.JobManager(max_workers=1)
         manager.shutdown()
         assert manager.submit("x") is False
+
+
+class TestRemoteDownload:
+    @staticmethod
+    def _fake_yt_dlp(monkeypatch, ffmpeg: str | None, proxy: str | None = None):
+        """Подменяет yt-dlp и ffmpeg, чтобы проверить параметры скачивания."""
+        calls: dict = {}
+        monkeypatch.setattr(pipeline, "_proxy_url", lambda: proxy)
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                calls["options"] = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def extract_info(self, url, download=True):
+                outtmpl = calls["options"]["outtmpl"]
+                Path(outtmpl.replace("%(ext)s", "mp4")).write_bytes(b"fake-video")
+                return {"title": "Видео с YouTube"}
+
+        fake_module = type("FakeYTDLP", (), {"YoutubeDL": FakeYoutubeDL})
+        monkeypatch.setitem(sys.modules, "yt_dlp", fake_module)
+        if ffmpeg:
+            monkeypatch.setattr(
+                type(settings), "ffmpeg", property(lambda self: ffmpeg)
+            )
+        else:
+            monkeypatch.setattr(
+                type(settings), "ffmpeg", property(lambda self: None)
+            )
+        return calls
+
+    def test_uses_bundled_ffmpeg_for_merging(self, monkeypatch):
+        ffmpeg = str(Path(settings.tools_dir) / "ffmpeg" / "bin" / "ffmpeg.exe")
+        calls = self._fake_yt_dlp(monkeypatch, ffmpeg)
+        create_lecture("remote-lecture")
+
+        path = pipeline._download_remote(
+            "remote-lecture", "https://www.youtube.com/watch?v=test", lambda *a: None
+        )
+
+        assert path.suffix == ".mp4"
+        assert path.read_bytes() == b"fake-video"
+        assert calls["options"]["ffmpeg_location"] == str(Path(ffmpeg).parent)
+        assert "+ba" in calls["options"]["format"]
+        with db.db() as conn:
+            lecture = dict(conn.execute(
+                "SELECT title FROM lectures WHERE id='remote-lecture'"
+            ).fetchone())
+        assert lecture["title"] == "Видео с YouTube"
+
+    def test_falls_back_to_single_format_without_ffmpeg(self, monkeypatch):
+        calls = self._fake_yt_dlp(monkeypatch, None)
+        create_lecture("remote-no-ffmpeg")
+
+        pipeline._download_remote(
+            "remote-no-ffmpeg", "https://vimeo.com/123", lambda *a: None
+        )
+
+        assert "ffmpeg_location" not in calls["options"]
+        assert calls["options"]["format"] == "b[height<=720]/b"
+        assert "+ba" not in calls["options"]["format"]
+
+    def test_download_uses_detected_proxy(self, monkeypatch):
+        ffmpeg = str(Path(settings.tools_dir) / "ffmpeg" / "bin" / "ffmpeg.exe")
+        calls = self._fake_yt_dlp(monkeypatch, ffmpeg, proxy="http://127.0.0.1:10809")
+        create_lecture("remote-proxy")
+
+        pipeline._download_remote(
+            "remote-proxy", "https://www.youtube.com/watch?v=test", lambda *a: None
+        )
+
+        assert calls["options"]["proxy"] == "http://127.0.0.1:10809"
+
+    def test_proxy_from_environment(self, monkeypatch):
+        for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                     "ALL_PROXY", "all_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.local:3128")
+        assert pipeline._proxy_url() == "http://proxy.local:3128"
+
+    @pytest.mark.parametrize("raw, expected", [
+        ("127.0.0.1:10809", "http://127.0.0.1:10809"),
+        ("http=proxy:8080;https=secure:8443", "http://secure:8443"),
+        ("socks=proxy:1080", "socks5://proxy:1080"),
+        ("", ""),
+    ])
+    def test_normalize_proxy(self, raw, expected):
+        assert pipeline._normalize_proxy(raw) == expected
+
+    def test_download_error_strips_ansi(self, monkeypatch):
+        class BrokenYoutubeDL:
+            def __init__(self, options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def extract_info(self, url, download=True):
+                raise RuntimeError("\x1b[0;31mERROR:\x1b[0m video unavailable")
+
+        fake_module = type("FakeYTDLP", (), {"YoutubeDL": BrokenYoutubeDL})
+        monkeypatch.setitem(sys.modules, "yt_dlp", fake_module)
+        create_lecture("remote-broken")
+
+        with pytest.raises(pipeline.MediaError) as info:
+            pipeline._download_remote(
+                "remote-broken", "https://youtu.be/broken", lambda *a: None
+            )
+
+        message = str(info.value)
+        assert message.startswith("Не удалось скачать видео:")
+        assert "\x1b[" not in message
+        assert "video unavailable" in message
 
 
 @pytest.mark.integration

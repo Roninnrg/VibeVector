@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+import re
 import threading
 import time
 import traceback
@@ -24,6 +26,7 @@ from .search import get_search_service, reset_search_service
 
 log = logging.getLogger(__name__)
 VIDEO_EXT = {".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi"}
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _update(lecture_id: str, **fields) -> None:
@@ -100,6 +103,49 @@ class JobManager:
 MANAGER = JobManager(max_workers=1)
 
 
+def _normalize_proxy(server: str) -> str:
+    """Приводит значение ProxyServer из реестра Windows к URL для yt-dlp."""
+    parts: dict[str, str] = {}
+    for chunk in server.split(";"):
+        if "=" in chunk:
+            scheme, _, address = chunk.partition("=")
+            parts[scheme.strip().lower()] = address.strip()
+        elif chunk.strip():
+            parts["http"] = chunk.strip()
+    for scheme in ("https", "http", "socks"):
+        address = parts.get(scheme)
+        if address:
+            if "://" in address:
+                return address
+            return f"{'socks5' if scheme == 'socks' else 'http'}://{address}"
+    return ""
+
+
+def _proxy_url() -> str | None:
+    """Возвращает прокси из окружения или системных настроек Windows."""
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                 "ALL_PROXY", "all_proxy"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        ) as key:
+            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            server, _ = winreg.QueryValueEx(key, "ProxyServer")
+    except OSError:
+        return None
+    if not enabled or not server:
+        return None
+    return _normalize_proxy(str(server)) or None
+
+
 def _download_remote(lecture_id: str, url: str, progress: Callable[[int, str], None]) -> Path:
     try:
         import yt_dlp  # noqa: WPS433
@@ -119,6 +165,7 @@ def _download_remote(lecture_id: str, url: str, progress: Callable[[int, str], N
         elif status.get("status") == "finished":
             progress(8, "Скачивание завершено")
 
+    ffmpeg = settings.ffmpeg
     options = {
         "outtmpl": str(out_dir / f"{lecture_id}.%(ext)s"),
         "format": "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720]/bv*[height<=720]+ba/b",
@@ -132,12 +179,27 @@ def _download_remote(lecture_id: str, url: str, progress: Callable[[int, str], N
         "restrictfilenames": True,
         "paths": {"home": str(out_dir)},
     }
+    if ffmpeg:
+        # yt-dlp ищет ffmpeg в PATH, а в поставке «Вектора» он лежит в tools/ffmpeg/bin.
+        options["ffmpeg_location"] = str(Path(ffmpeg).parent if Path(ffmpeg).suffix else ffmpeg)
+    else:
+        # Без ffmpeg склейка дорожек невозможна — просим готовый файл целиком.
+        options["format"] = "b[height<=720]/b"
+    proxy = _proxy_url()
+    if proxy:
+        # Python не читает системный прокси Windows — передаём его yt-dlp явно.
+        options["proxy"] = proxy
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=True)
     except Exception as exc:
-        raise MediaError(f"Не удалось скачать видео: {str(exc)[:500]}") from exc
-    candidates = sorted(out_dir.glob(f"{lecture_id}.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        message = ANSI_RE.sub("", str(exc)).strip()
+        raise MediaError(f"Не удалось скачать видео: {message[:500]}") from exc
+    candidates = [
+        item for item in out_dir.glob(f"{lecture_id}.*")
+        if item.is_file() and item.suffix.lower() not in {".part", ".ytdl", ".temp"}
+    ]
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     if not candidates:
         raise MediaError("Сервис не вернул медиафайл.")
     path = candidates[0]
